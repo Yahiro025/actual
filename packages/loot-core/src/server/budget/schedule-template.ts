@@ -13,6 +13,7 @@ import {
   getDateWithSkippedWeekend,
   getNextDate,
   getOccurrencesBetween,
+  getScheduledAmount,
 } from '#shared/schedules';
 import { amountToInteger } from '#shared/util';
 import type { CategoryEntity, TransactionEntity } from '#types/models';
@@ -80,11 +81,15 @@ export async function createScheduleList(
     const conditions = rule.serialize().conditions;
     const { date: dateConditions, amount: amountCondition } =
       extractScheduleConds(conditions);
-    let scheduleAmount =
-      amountCondition.op === 'isbetween'
-        ? Math.round(amountCondition.value.num1 + amountCondition.value.num2) /
-          2
-        : amountCondition.value;
+    if (!dateConditions) {
+      throw new Error(
+        `Schedule ${scheduleName} has no date condition. Add a date criterion to the schedule's rule, or remove this schedule template.`,
+      );
+    }
+    // The schedule page treats a rule with no amount criterion as $0 (see
+    // getScheduledAmount), so the template does the same instead of crashing
+    // on a null condition (#9126).
+    let scheduleAmount = getScheduledAmount(amountCondition?.value);
     // Apply adjustment percentage if specified
     if (template.adjustment !== undefined && template.adjustmentType) {
       switch (template.adjustmentType) {

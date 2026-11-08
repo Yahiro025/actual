@@ -136,6 +136,87 @@ describe('createScheduleList', () => {
     expect(t[0].dateConditions).toBeDefined();
     expect(t[0].dateConditions.value.frequency).toBe('monthly');
   });
+
+  it('treats a schedule rule with no amount condition as 0', async () => {
+    // #9126: deleting the amount criterion from a schedule's rule crashed the
+    // template on a null condition. The schedule page shows $0 for the same
+    // schedule (getScheduledAmount returns 0 when the amount is missing), so
+    // the template budgets 0 rather than erroring.
+    vi.mocked(db.first).mockResolvedValue({ id: 1, completed: 0 });
+    vi.mocked(getRuleForSchedule).mockResolvedValue(
+      new Rule({
+        id: 'r',
+        stage: 'pre',
+        conditionsOp: 'and',
+        conditions: [
+          {
+            op: 'is',
+            field: 'date',
+            value: {
+              start: '2024-08-01',
+              interval: 1,
+              frequency: 'monthly',
+              patterns: [],
+              skipWeekend: false,
+              weekendSolveMode: 'before',
+              endMode: 'never',
+              endOccurrences: 1,
+              endDate: '2099-01-01',
+            },
+            type: 'date',
+          },
+        ],
+        actions: [],
+      }),
+    );
+    vi.mocked(isTrackingBudget).mockReturnValue(false);
+
+    const template = {
+      type: 'schedule',
+      name: 'Test Schedule',
+      priority: 0,
+      directive: 'template',
+    } as const;
+
+    const { t } = await createScheduleList(
+      [template],
+      '2024-08-01',
+      defaultCategory,
+    );
+
+    expect(t[0].target).toBeCloseTo(0);
+    expect(t[0].perOccurrenceAmount).toBeCloseTo(0);
+  });
+
+  it('throws a clear error when the schedule rule has no date condition', async () => {
+    // A schedule with no date has no next occurrence to fund, so there is no
+    // zero default to fall back to; report it instead of crashing on the
+    // missing condition.
+    vi.mocked(db.first).mockResolvedValue({ id: 1, completed: 0 });
+    vi.mocked(getRuleForSchedule).mockResolvedValue(
+      new Rule({
+        id: 'r',
+        stage: 'pre',
+        conditionsOp: 'and',
+        conditions: [
+          { op: 'is', field: 'amount', value: -10000, type: 'number' },
+        ],
+        actions: [],
+      }),
+    );
+    vi.mocked(isTrackingBudget).mockReturnValue(false);
+
+    const template = {
+      type: 'schedule',
+      name: 'Test Schedule',
+      priority: 0,
+      directive: 'template',
+    } as const;
+
+    await expect(
+      createScheduleList([template], '2024-08-01', defaultCategory),
+    ).rejects.toThrow('has no date condition');
+  });
 });
 
 describe('buildMonthlyOutflow', () => {
@@ -722,6 +803,56 @@ describe('runScheduleForecast', () => {
     );
 
     expect(result.to_budget).toBe(10000);
+  });
+
+  it('budgets nothing for a schedule whose rule has no amount condition', async () => {
+    const template_lines = [
+      {
+        type: 'schedule',
+        name: 'Rent',
+        priority: 0,
+        directive: 'template',
+      } as const,
+    ];
+    vi.mocked(db.first).mockResolvedValue({ id: 1, completed: 0 });
+    vi.mocked(getRuleForSchedule).mockResolvedValue(
+      new Rule({
+        id: 'r',
+        stage: 'pre',
+        conditionsOp: 'and',
+        conditions: [
+          {
+            op: 'is',
+            field: 'date',
+            value: {
+              start: '2024-01-15',
+              interval: 1,
+              frequency: 'monthly',
+              patterns: [],
+              skipWeekend: false,
+              weekendSolveMode: 'before',
+              endMode: 'never',
+              endOccurrences: 1,
+              endDate: '2099-01-01',
+            },
+            type: 'date',
+          },
+        ],
+        actions: [],
+      }),
+    );
+    vi.mocked(isTrackingBudget).mockReturnValue(false);
+
+    const result = await runScheduleForecast(
+      template_lines,
+      '2024-01-01',
+      0,
+      0,
+      defaultCategory,
+    );
+
+    expect(result.to_budget).toBe(0);
+    expect(result.perScheduleMonthly.get(template_lines[0])).toBe(0);
   });
 
   it('never projects a negative month-end balance across two schedules sharing a category', async () => {

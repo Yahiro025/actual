@@ -3,7 +3,9 @@ import { vi } from 'vitest';
 import { logger } from '#platform/server/log';
 import * as aql from '#server/aql';
 import * as db from '#server/db';
-import type { DbCategory } from '#server/db';
+import type { DbCategory, DbSchedule } from '#server/db';
+import { Rule } from '#server/rules';
+import { getRuleForSchedule } from '#server/schedules/app';
 import type { CategoryEntity } from '#types/models';
 import type { Template } from '#types/models/templates';
 
@@ -43,10 +45,31 @@ vi.mock('./statements', () => ({
   getActiveSchedules: vi.fn(),
 }));
 
+vi.mock('#server/schedules/app', async () => {
+  const actualModule = await vi.importActual('#server/schedules/app');
+  return {
+    ...actualModule,
+    getRuleForSchedule: vi.fn(),
+  };
+});
+
 vi.mock('./template-notes', () => ({
   checkTemplateNotes: vi.fn(),
   storeNoteTemplates: vi.fn(),
 }));
+
+// The row shape getActiveSchedules reads; named here so the fixture does not
+// depend on the function's inferred return type.
+type ActiveScheduleRow = Pick<
+  DbSchedule,
+  | 'id'
+  | 'rule'
+  | 'active'
+  | 'completed'
+  | 'posts_transaction'
+  | 'tombstone'
+  | 'name'
+>;
 
 const category: CategoryEntity = {
   id: 'cat-1',
@@ -581,6 +604,48 @@ describe('applyMultipleCategoryTemplates', () => {
 
     expect(result.message).toBe('template-errors');
     expect(result.pre).toMatch(/Target month has passed/);
+    expect(actions.setBudget).not.toHaveBeenCalled();
+  });
+
+  it('returns an error notification for a schedule whose rule has no date condition', async () => {
+    // #9126: a missing amount criterion is $0, like the schedule page, so it
+    // no longer errors. A schedule with no date has no next occurrence to
+    // fund, so it must surface through the template-errors notification
+    // instead of failing the apply with an opaque crash.
+    setupSheetMock({ 'to-budget': 100000 });
+    setupAqlMultiCategory([cat1], {
+      [cat1.id]: [
+        {
+          type: 'schedule',
+          scheduleId: 's1',
+          name: 'Rent',
+          directive: 'template',
+          priority: 1,
+        },
+      ],
+    });
+    vi.mocked(statements.getActiveSchedules).mockResolvedValue([
+      { name: 'Rent', id: 's1' } as ActiveScheduleRow,
+    ]);
+    vi.mocked(getRuleForSchedule).mockResolvedValue(
+      new Rule({
+        id: 'r1',
+        stage: 'pre',
+        conditionsOp: 'and',
+        conditions: [
+          { op: 'is', field: 'amount', value: -10000, type: 'number' },
+        ],
+        actions: [],
+      }),
+    );
+
+    const result = await applyMultipleCategoryTemplates({
+      month: '2024-06',
+      categoryIds: [cat1.id],
+    });
+
+    expect(result.message).toBe('template-errors');
+    expect(result.pre).toMatch(/has no date condition/);
     expect(actions.setBudget).not.toHaveBeenCalled();
   });
 
